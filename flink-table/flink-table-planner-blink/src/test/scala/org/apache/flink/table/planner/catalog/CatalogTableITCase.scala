@@ -20,8 +20,10 @@ package org.apache.flink.table.planner.catalog
 
 import org.apache.flink.table.api.config.ExecutionConfigOptions
 import org.apache.flink.table.api.internal.TableEnvironmentImpl
-import org.apache.flink.table.api.{EnvironmentSettings, TableEnvironment, TableException, ValidationException}
+import org.apache.flink.table.api.{EnvironmentSettings, TableEnvironment, ValidationException}
+import org.apache.flink.table.catalog.{CatalogFunctionImpl, ObjectPath}
 import org.apache.flink.table.planner.factories.utils.TestCollectionTableFactory
+import org.apache.flink.table.planner.runtime.utils.JavaUserDefinedScalarFunctions.JavaFunc0
 import org.apache.flink.types.Row
 
 import org.junit.Assert.assertEquals
@@ -70,6 +72,14 @@ class CatalogTableITCase(isStreamingMode: Boolean) {
       .setInteger(ExecutionConfigOptions.TABLE_EXEC_RESOURCE_DEFAULT_PARALLELISM, 1)
     TestCollectionTableFactory.reset()
     TestCollectionTableFactory.isStreaming = isStreamingMode
+
+    val func = new CatalogFunctionImpl(
+      classOf[JavaFunc0].getName,
+      new util.HashMap[String, String]())
+    tableEnv.getCatalog(tableEnv.getCurrentCatalog).get().createFunction(
+      new ObjectPath(tableEnv.getCurrentDatabase, "myfunc"),
+      func,
+      true)
   }
 
   def toRow(args: Any*):Row = {
@@ -82,6 +92,46 @@ class CatalogTableITCase(isStreamingMode: Boolean) {
 
   def execJob(name: String) = {
     tableEnv.execute(name)
+  }
+
+  private def testUdf(funcPrefix: String): Unit = {
+    val sinkDDL =
+      """
+        |create table sinkT(
+        |  a bigint
+        |) with (
+        |  'connector' = 'COLLECTION'
+        |)
+      """.stripMargin
+    tableEnv.sqlUpdate(sinkDDL)
+    tableEnv.sqlUpdate(s"insert into sinkT select ${funcPrefix}myfunc(cast(1 as bigint))")
+    tableEnv.execute("")
+    assertEquals(Seq(toRow(2L)), TestCollectionTableFactory.RESULT.sorted)
+  }
+
+  @Test
+  def testUdfWithFullIdentifier(): Unit = {
+    testUdf("default_catalog.default_database.")
+  }
+
+  @Test
+  def testUdfWithDatabase(): Unit = {
+    testUdf("default_database.")
+  }
+
+  @Test
+  def testUdfWithNon(): Unit = {
+    testUdf("")
+  }
+
+  @Test(expected = classOf[ValidationException])
+  def testUdfWithWrongCatalog(): Unit = {
+    testUdf("wrong_catalog.default_database.")
+  }
+
+  @Test(expected = classOf[ValidationException])
+  def testUdfWithWrongDatabase(): Unit = {
+    testUdf("default_catalog.wrong_database.")
   }
 
   @Test
@@ -306,7 +356,7 @@ class CatalogTableITCase(isStreamingMode: Boolean) {
     assertEquals(TestCollectionTableFactory.RESULT.sorted, sourceData.sorted)
   }
 
-  @Test @Ignore // need to implement
+  @Test @Ignore("FLINK-14320") // need to implement
   def testStreamSourceTableWithRowtime(): Unit = {
     val sourceData = List(
       toRow(1, 1000),
@@ -317,10 +367,9 @@ class CatalogTableITCase(isStreamingMode: Boolean) {
     val sourceDDL =
       """
         |create table t1(
-        |  a bigint,
+        |  a timestamp(3),
         |  b bigint,
-        |  primary key(a),
-        |  WATERMARK wm FOR a AS BOUNDED WITH DELAY 1000 MILLISECOND
+        |  WATERMARK FOR a AS a - interval '1' SECOND
         |) with (
         |  'connector' = 'COLLECTION'
         |)
@@ -328,7 +377,7 @@ class CatalogTableITCase(isStreamingMode: Boolean) {
     val sinkDDL =
       """
         |create table t2(
-        |  a bigint,
+        |  a timestamp(3),
         |  b bigint
         |) with (
         |  'connector' = 'COLLECTION'
@@ -337,7 +386,7 @@ class CatalogTableITCase(isStreamingMode: Boolean) {
     val query =
       """
         |insert into t2
-        |select sum(a), sum(b) from t1 group by TUMBLE(wm, INTERVAL '1' SECOND)
+        |select a, sum(b) from t1 group by TUMBLE(a, INTERVAL '1' SECOND)
       """.stripMargin
 
     tableEnv.sqlUpdate(sourceDDL)
@@ -388,7 +437,7 @@ class CatalogTableITCase(isStreamingMode: Boolean) {
     assertEquals(TestCollectionTableFactory.RESULT.sorted, sourceData.sorted)
   }
 
-  @Test @Ignore // need to implement
+  @Test @Ignore("FLINK-14320") // need to implement
   def testBatchTableWithRowtime(): Unit = {
     val sourceData = List(
       toRow(1, 1000),
@@ -399,10 +448,9 @@ class CatalogTableITCase(isStreamingMode: Boolean) {
     val sourceDDL =
       """
         |create table t1(
-        |  a bigint,
+        |  a timestamp(3),
         |  b bigint,
-        |  primary key(a),
-        |  WATERMARK wm FOR a AS BOUNDED WITH DELAY 1000 MILLISECOND
+        |  WATERMARK FOR a AS a - interval '1' SECOND
         |) with (
         |  'connector' = 'COLLECTION'
         |)
@@ -410,7 +458,7 @@ class CatalogTableITCase(isStreamingMode: Boolean) {
     val sinkDDL =
       """
         |create table t2(
-        |  a bigint,
+        |  a timestamp(3),
         |  b bigint
         |) with (
         |  'connector' = 'COLLECTION'
@@ -419,7 +467,7 @@ class CatalogTableITCase(isStreamingMode: Boolean) {
     val query =
       """
         |insert into t2
-        |select sum(a), sum(b) from t1 group by TUMBLE(wm, INTERVAL '1' SECOND)
+        |select a, sum(b) from t1 group by TUMBLE(a, INTERVAL '1' SECOND)
       """.stripMargin
 
     tableEnv.sqlUpdate(sourceDDL)

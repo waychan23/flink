@@ -252,7 +252,7 @@ public final class ConfigConstants {
 	 * memory manager (in megabytes). If not set, a relative fraction will be allocated, as defined
 	 * by {@link #TASK_MANAGER_MEMORY_FRACTION_KEY}.
 	 *
-	 * @deprecated Use {@link TaskManagerOptions#MANAGED_MEMORY_SIZE} instead
+	 * @deprecated Use {@link TaskManagerOptions#LEGACY_MANAGED_MEMORY_SIZE} instead
 	 */
 	@Deprecated
 	public static final String TASK_MANAGER_MEMORY_SIZE_KEY = "taskmanager.memory.size";
@@ -260,7 +260,7 @@ public final class ConfigConstants {
 	/**
 	 * The config parameter defining the fraction of free memory allocated by the memory manager.
 	 *
-	 * @deprecated Use {@link TaskManagerOptions#MANAGED_MEMORY_FRACTION} instead
+	 * @deprecated Use {@link TaskManagerOptions#LEGACY_MANAGED_MEMORY_FRACTION} instead
 	 */
 	@Deprecated
 	public static final String TASK_MANAGER_MEMORY_FRACTION_KEY = "taskmanager.memory.fraction";
@@ -272,15 +272,6 @@ public final class ConfigConstants {
 	 */
 	@Deprecated
 	public static final String TASK_MANAGER_MEMORY_OFF_HEAP_KEY = "taskmanager.memory.off-heap";
-
-	/**
-	 * The config parameter for specifying whether TaskManager managed memory should be preallocated
-	 * when the TaskManager is starting. (default is false)
-	 *
-	 * @deprecated Use {@link TaskManagerOptions#MANAGED_MEMORY_PRE_ALLOCATE} instead
-	 */
-	@Deprecated
-	public static final String TASK_MANAGER_MEMORY_PRE_ALLOCATE_KEY = "taskmanager.memory.preallocate";
 
 	/**
 	 * The config parameter defining the number of buffers used in the network stack. This defines the
@@ -1427,7 +1418,7 @@ public final class ConfigConstants {
 	/**
 	 * Config key has been deprecated. Therefore, no default value required.
 	 *
-	 * @deprecated {@link TaskManagerOptions#MANAGED_MEMORY_FRACTION} provides the default value now
+	 * @deprecated {@link TaskManagerOptions#LEGACY_MANAGED_MEMORY_FRACTION} provides the default value now
 	 */
 	@Deprecated
 	public static final float DEFAULT_MEMORY_MANAGER_MEMORY_FRACTION = 0.7f;
@@ -1501,14 +1492,6 @@ public final class ConfigConstants {
 	 */
 	@Deprecated
 	public static final String DEFAULT_TASK_MANAGER_REFUSED_REGISTRATION_PAUSE = "10 s";
-
-	/**
-	 * Config key has been deprecated. Therefore, no default value required.
-	 *
-	 * @deprecated {@link TaskManagerOptions#MANAGED_MEMORY_PRE_ALLOCATE} provides the default value now
-	 */
-	@Deprecated
-	public static final boolean DEFAULT_TASK_MANAGER_MEMORY_PRE_ALLOCATE = false;
 
 	/** @deprecated Please use {@link TaskManagerOptions#TASK_CANCELLATION_INTERVAL}. */
 	@Deprecated
@@ -2028,6 +2011,9 @@ public final class ConfigConstants {
 
 	/** The environment variable name which contains the location of the plugins folder. */
 	public static final String ENV_FLINK_PLUGINS_DIR = "FLINK_PLUGINS_DIR";
+
+	/** The default Flink plugins directory if none has been specified via {@link #ENV_FLINK_PLUGINS_DIR}. */
+	public static final String DEFAULT_FLINK_PLUGINS_DIRS = "plugins";
 
 	/** The environment variable name which contains the location of the bin directory. */
 	public static final String ENV_FLINK_BIN_DIR = "FLINK_BIN_DIR";

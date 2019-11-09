@@ -28,6 +28,8 @@ import org.apache.flink.api.java.DataSet;
 import org.apache.flink.api.java.ExecutionEnvironment;
 import org.apache.flink.api.java.io.DiscardingOutputFormat;
 import org.apache.flink.api.java.tuple.Tuple2;
+import org.apache.flink.client.ClientUtils;
+import org.apache.flink.client.FlinkPipelineTranslationUtil;
 import org.apache.flink.configuration.AkkaOptions;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.JobManagerOptions;
@@ -36,15 +38,17 @@ import org.apache.flink.optimizer.Optimizer;
 import org.apache.flink.optimizer.costs.DefaultCostEstimator;
 import org.apache.flink.optimizer.plan.OptimizedPlan;
 import org.apache.flink.optimizer.plandump.PlanJSONDumpGenerator;
-import org.apache.flink.runtime.jobgraph.SavepointRestoreSettings;
+import org.apache.flink.runtime.jobgraph.JobGraph;
 import org.apache.flink.runtime.testutils.MiniClusterResource;
 import org.apache.flink.runtime.testutils.MiniClusterResourceConfiguration;
+import org.apache.flink.testutils.junit.category.AlsoRunWithSchedulerNG;
 import org.apache.flink.util.NetUtils;
 import org.apache.flink.util.TestLogger;
 
 import org.junit.Before;
 import org.junit.ClassRule;
 import org.junit.Test;
+import org.junit.experimental.categories.Category;
 import org.mockito.invocation.InvocationOnMock;
 import org.mockito.stubbing.Answer;
 
@@ -59,6 +63,7 @@ import static org.mockito.Mockito.mock;
 /**
  * Simple and maybe stupid test to check the {@link ClusterClient} class.
  */
+@Category(AlsoRunWithSchedulerNG.class)
 public class ClientTest extends TestLogger {
 
 	@ClassRule
@@ -93,11 +98,9 @@ public class ClientTest extends TestLogger {
 	@Test
 	public void testDetachedMode() throws Exception{
 		final ClusterClient<?> clusterClient = new MiniClusterClient(new Configuration(), MINI_CLUSTER_RESOURCE.getMiniCluster());
-		clusterClient.setDetached(true);
-
 		try {
 			PackagedProgram prg = new PackagedProgram(TestExecuteTwice.class);
-			clusterClient.run(prg, 1);
+			ClientUtils.executeProgram(clusterClient, prg, 1, true);
 			fail(FAIL_MESSAGE);
 		} catch (ProgramInvocationException e) {
 			assertEquals(
@@ -107,7 +110,7 @@ public class ClientTest extends TestLogger {
 
 		try {
 			PackagedProgram prg = new PackagedProgram(TestEager.class);
-			clusterClient.run(prg, 1);
+			ClientUtils.executeProgram(clusterClient, prg, 1, true);
 			fail(FAIL_MESSAGE);
 		} catch (ProgramInvocationException e) {
 			assertEquals(
@@ -117,7 +120,7 @@ public class ClientTest extends TestLogger {
 
 		try {
 			PackagedProgram prg = new PackagedProgram(TestGetRuntime.class);
-			clusterClient.run(prg, 1);
+			ClientUtils.executeProgram(clusterClient, prg, 1, true);
 			fail(FAIL_MESSAGE);
 		} catch (ProgramInvocationException e) {
 			assertEquals(
@@ -127,7 +130,7 @@ public class ClientTest extends TestLogger {
 
 		try {
 			PackagedProgram prg = new PackagedProgram(TestGetAccumulator.class);
-			clusterClient.run(prg, 1);
+			ClientUtils.executeProgram(clusterClient, prg, 1, true);
 			fail(FAIL_MESSAGE);
 		} catch (ProgramInvocationException e) {
 			assertEquals(
@@ -137,7 +140,7 @@ public class ClientTest extends TestLogger {
 
 		try {
 			PackagedProgram prg = new PackagedProgram(TestGetAllAccumulator.class);
-			clusterClient.run(prg, 1);
+			ClientUtils.executeProgram(clusterClient, prg, 1, true);
 			fail(FAIL_MESSAGE);
 		} catch (ProgramInvocationException e) {
 			assertEquals(
@@ -152,15 +155,15 @@ public class ClientTest extends TestLogger {
 	@Test
 	public void shouldSubmitToJobClient() throws Exception {
 		final ClusterClient<?> clusterClient = new MiniClusterClient(new Configuration(), MINI_CLUSTER_RESOURCE.getMiniCluster());
-		clusterClient.setDetached(true);
-		JobSubmissionResult result = clusterClient.run(
-			plan,
-			Collections.emptyList(),
-			Collections.emptyList(),
-			getClass().getClassLoader(),
-			1,
-			SavepointRestoreSettings.none());
+		JobGraph jobGraph = FlinkPipelineTranslationUtil.getJobGraph(
+				plan,
+				new Configuration(),
+				1);
 
+		ClientUtils.addJarFiles(jobGraph, Collections.emptyList());
+		jobGraph.setClasspaths(Collections.emptyList());
+
+		JobSubmissionResult result = ClientUtils.submitJob(clusterClient, jobGraph);
 		assertNotNull(result);
 	}
 
@@ -181,8 +184,7 @@ public class ClientTest extends TestLogger {
 
 		try {
 			final ClusterClient<?> client = new MiniClusterClient(new Configuration(), MINI_CLUSTER_RESOURCE.getMiniCluster());
-			client.setDetached(true);
-			client.run(packagedProgramMock, 1);
+			ClientUtils.executeProgram(client, packagedProgramMock, 1, true);
 			fail("Creating the local execution environment should not be possible");
 		}
 		catch (InvalidProgramException e) {
@@ -195,7 +197,8 @@ public class ClientTest extends TestLogger {
 		PackagedProgram prg = new PackagedProgram(TestOptimizerPlan.class, "/dev/random", "/tmp");
 
 		Optimizer optimizer = new Optimizer(new DataStatistics(), new DefaultCostEstimator(), config);
-		OptimizedPlan op = (OptimizedPlan) ClusterClient.getOptimizedPlan(optimizer, prg, 1);
+		Plan plan = (Plan) PackagedProgramUtils.getPipelineFromProgram(prg, 1);
+		OptimizedPlan op = optimizer.compile(plan);
 		assertNotNull(op);
 
 		PlanJSONDumpGenerator dumper = new PlanJSONDumpGenerator();

@@ -89,7 +89,6 @@ public class SimpleSlotProvider implements SlotProvider, SlotOwner {
 			SlotRequestId slotRequestId,
 			ScheduledUnit task,
 			SlotProfile slotProfile,
-			boolean allowQueued,
 			Time allocationTimeout) {
 		final SlotContext slot;
 
@@ -111,8 +110,7 @@ public class SimpleSlotProvider implements SlotProvider, SlotOwner {
 					.createTestingLogicalSlot();
 				allocatedSlots.put(slotRequestId, slot);
 				return CompletableFuture.completedFuture(result);
-			}
-			else {
+			} else {
 				return FutureUtils.completedExceptionally(new NoResourceAvailableException());
 			}
 		}

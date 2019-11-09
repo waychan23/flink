@@ -21,6 +21,7 @@ package org.apache.flink.streaming.runtime.tasks;
 import org.apache.flink.api.common.ExecutionConfig;
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
+import org.apache.flink.api.common.typeutils.base.StringSerializer;
 import org.apache.flink.configuration.CheckpointingOptions;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.NettyShuffleEnvironmentOptions;
@@ -53,6 +54,7 @@ import org.apache.flink.runtime.filecache.FileCache;
 import org.apache.flink.runtime.io.disk.iomanager.IOManager;
 import org.apache.flink.runtime.io.network.NettyShuffleEnvironmentBuilder;
 import org.apache.flink.runtime.io.network.TaskEventDispatcher;
+import org.apache.flink.runtime.io.network.api.writer.RecordWriter;
 import org.apache.flink.runtime.io.network.partition.NoOpResultPartitionConsumableNotifier;
 import org.apache.flink.runtime.io.network.partition.ResultPartitionConsumableNotifier;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
@@ -102,10 +104,12 @@ import org.apache.flink.streaming.api.TimeCharacteristic;
 import org.apache.flink.streaming.api.functions.source.SourceFunction;
 import org.apache.flink.streaming.api.graph.StreamConfig;
 import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
+import org.apache.flink.streaming.api.operators.ChainingStrategy;
 import org.apache.flink.streaming.api.operators.InternalTimeServiceManager;
 import org.apache.flink.streaming.api.operators.OperatorSnapshotFutures;
 import org.apache.flink.streaming.api.operators.Output;
 import org.apache.flink.streaming.api.operators.StreamOperator;
+import org.apache.flink.streaming.api.operators.StreamOperatorFactory;
 import org.apache.flink.streaming.api.operators.StreamOperatorStateContext;
 import org.apache.flink.streaming.api.operators.StreamSource;
 import org.apache.flink.streaming.api.operators.StreamTaskStateInitializer;
@@ -113,7 +117,7 @@ import org.apache.flink.streaming.runtime.io.InputStatus;
 import org.apache.flink.streaming.runtime.io.StreamInputProcessor;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 import org.apache.flink.streaming.runtime.streamstatus.StreamStatusMaintainer;
-import org.apache.flink.streaming.runtime.tasks.mailbox.execution.DefaultActionContext;
+import org.apache.flink.streaming.runtime.tasks.mailbox.MailboxDefaultAction;
 import org.apache.flink.streaming.util.TestSequentialReadingStreamOperator;
 import org.apache.flink.util.CloseableIterable;
 import org.apache.flink.util.ExceptionUtils;
@@ -135,6 +139,7 @@ import javax.annotation.Nullable;
 import java.io.Closeable;
 import java.io.IOException;
 import java.io.ObjectInputStream;
+import java.io.StreamCorruptedException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -773,9 +778,9 @@ public class StreamTaskTest extends TestLogger {
 				}
 
 				@Override
-				protected void processInput(DefaultActionContext context) throws Exception {
-					mailboxProcessor.getMailboxExecutor(0).execute(latch::trigger);
-					context.allActionsCompleted();
+				protected void processInput(MailboxDefaultAction.Controller controller) throws Exception {
+					mailboxProcessor.getMailboxExecutor(0).execute(latch::trigger, "trigger");
+					controller.allActionsCompleted();
 				}
 			});
 			latch.await();
@@ -834,6 +839,54 @@ public class StreamTaskTest extends TestLogger {
 				fail("should fail with an UnsupportedOperationException");
 			}
 		}
+	}
+
+	/**
+	 * This test ensures that {@link RecordWriter} is correctly closed even if we fail to construct
+	 * {@link OperatorChain}, for example because of user class deserialization error.
+	 */
+	@Test
+	public void testRecordWriterClosedOnStreamOperatorFactoryDeserializationError() throws Exception {
+		Configuration taskConfiguration = new Configuration();
+		StreamConfig streamConfig = new StreamConfig(taskConfiguration);
+		streamConfig.setStreamOperatorFactory(new UnusedOperatorFactory());
+
+		// Make sure that there is some output edge in the config so that some RecordWriter is created
+		StreamConfigChainer cfg = new StreamConfigChainer(new OperatorID(42, 42), streamConfig);
+		cfg.chain(
+			new OperatorID(44, 44),
+			new UnusedOperatorFactory(),
+			StringSerializer.INSTANCE,
+			StringSerializer.INSTANCE,
+			false);
+		cfg.finish();
+
+		// Overwrite the serialized bytes to some garbage to induce deserialization exception
+		taskConfiguration.setBytes(StreamConfig.SERIALIZEDUDF, new byte[42]);
+
+		try (MockEnvironment mockEnvironment =
+				new MockEnvironmentBuilder()
+					.setTaskConfiguration(taskConfiguration)
+					.build()) {
+
+			mockEnvironment.addOutput(new ArrayList<>());
+			StreamTask<String, TestSequentialReadingStreamOperator> streamTask =
+				new NoOpStreamTask<>(mockEnvironment);
+
+			try {
+				streamTask.invoke();
+				fail("Should have failed with an exception!");
+			} catch (Exception ex) {
+				if (!ExceptionUtils.findThrowable(ex, StreamCorruptedException.class).isPresent()) {
+					throw ex;
+				}
+			}
+		}
+
+		assertTrue(
+			RecordWriter.DEFAULT_OUTPUT_FLUSH_THREAD_NAME + " thread is still running",
+			Thread.getAllStackTraces().keySet().stream()
+				.noneMatch(thread -> thread.getName().startsWith(RecordWriter.DEFAULT_OUTPUT_FLUSH_THREAD_NAME)));
 	}
 
 	// ------------------------------------------------------------------------
@@ -923,7 +976,7 @@ public class StreamTaskTest extends TestLogger {
 	public static class NoOpStreamTask<T, OP extends StreamOperator<T>> extends StreamTask<T, OP> {
 
 		public NoOpStreamTask(Environment environment) {
-			super(environment, null);
+			super(environment);
 		}
 
 		@Override
@@ -1192,11 +1245,11 @@ public class StreamTaskTest extends TestLogger {
 		}
 
 		@Override
-		protected void processInput(DefaultActionContext context) throws Exception {
+		protected void processInput(MailboxDefaultAction.Controller controller) throws Exception {
 			if (fail) {
 				throw new RuntimeException();
 			}
-			context.allActionsCompleted();
+			controller.allActionsCompleted();
 		}
 
 		@Override
@@ -1205,11 +1258,12 @@ public class StreamTaskTest extends TestLogger {
 		@Override
 		public StreamTaskStateInitializer createStreamTaskStateInitializer() {
 			final StreamTaskStateInitializer streamTaskStateManager = super.createStreamTaskStateInitializer();
-			return (operatorID, operatorClassName, keyContext, keySerializer, closeableRegistry, metricGroup) -> {
+			return (operatorID, operatorClassName, processingTimeService, keyContext, keySerializer, closeableRegistry, metricGroup) -> {
 
-				final StreamOperatorStateContext context = streamTaskStateManager.streamOperatorStateContext(
+				final StreamOperatorStateContext controller = streamTaskStateManager.streamOperatorStateContext(
 					operatorID,
 					operatorClassName,
+					processingTimeService,
 					keyContext,
 					keySerializer,
 					closeableRegistry,
@@ -1218,33 +1272,33 @@ public class StreamTaskTest extends TestLogger {
 				return new StreamOperatorStateContext() {
 					@Override
 					public boolean isRestored() {
-						return context.isRestored();
+						return controller.isRestored();
 					}
 
 					@Override
 					public OperatorStateBackend operatorStateBackend() {
-						return context.operatorStateBackend();
+						return controller.operatorStateBackend();
 					}
 
 					@Override
 					public AbstractKeyedStateBackend<?> keyedStateBackend() {
-						return context.keyedStateBackend();
+						return controller.keyedStateBackend();
 					}
 
 					@Override
 					public InternalTimeServiceManager<?> internalTimerServiceManager() {
-						InternalTimeServiceManager<?> timeServiceManager = context.internalTimerServiceManager();
+						InternalTimeServiceManager<?> timeServiceManager = controller.internalTimerServiceManager();
 						return timeServiceManager != null ? spy(timeServiceManager) : null;
 					}
 
 					@Override
 					public CloseableIterable<StatePartitionStreamProvider> rawOperatorStateInputs() {
-						return replaceWithSpy(context.rawOperatorStateInputs());
+						return replaceWithSpy(controller.rawOperatorStateInputs());
 					}
 
 					@Override
 					public CloseableIterable<KeyGroupStatePartitionStreamProvider> rawKeyedStateInputs() {
-						return replaceWithSpy(context.rawKeyedStateInputs());
+						return replaceWithSpy(controller.rawKeyedStateInputs());
 					}
 
 					public <T extends Closeable> T replaceWithSpy(T closeable) {
@@ -1280,7 +1334,7 @@ public class StreamTaskTest extends TestLogger {
 		protected void init() {}
 
 		@Override
-		protected void processInput(DefaultActionContext context) throws Exception {
+		protected void processInput(MailboxDefaultAction.Controller controller) throws Exception {
 			holder = new LockHolder(getCheckpointLock(), latch);
 			holder.start();
 			latch.await();
@@ -1295,7 +1349,7 @@ public class StreamTaskTest extends TestLogger {
 				// restore interruption state
 				Thread.currentThread().interrupt();
 			}
-			context.allActionsCompleted();
+			controller.allActionsCompleted();
 		}
 
 		@Override
@@ -1325,7 +1379,7 @@ public class StreamTaskTest extends TestLogger {
 		protected void init() {}
 
 		@Override
-		protected void processInput(DefaultActionContext context) throws Exception {
+		protected void processInput(MailboxDefaultAction.Controller controller) throws Exception {
 			final OneShotLatch latch = new OneShotLatch();
 			final Object lock = new Object();
 
@@ -1351,7 +1405,7 @@ public class StreamTaskTest extends TestLogger {
 			finally {
 				holder.close();
 			}
-			context.allActionsCompleted();
+			controller.allActionsCompleted();
 		}
 
 		@Override
@@ -1373,7 +1427,7 @@ public class StreamTaskTest extends TestLogger {
 		private transient boolean hasTimerTriggered;
 
 		ThreadInspectingTask(Environment env) {
-			super(env, null);
+			super(env);
 			Thread currentThread = Thread.currentThread();
 			taskThreadId = currentThread.getId();
 			taskClassLoader = currentThread.getContextClassLoader();
@@ -1389,20 +1443,20 @@ public class StreamTaskTest extends TestLogger {
 			checkTaskThreadInfo();
 
 			// Create a time trigger to validate that it would also be invoked in the task's thread.
-			getProcessingTimeService().registerTimer(0, new ProcessingTimeCallback() {
+			getProcessingTimeService(0).registerTimer(0, new ProcessingTimeCallback() {
 				@Override
 				public void onProcessingTime(long timestamp) throws Exception {
-					hasTimerTriggered = true;
 					checkTaskThreadInfo();
+					hasTimerTriggered = true;
 				}
 			});
 		}
 
 		@Override
-		protected void processInput(DefaultActionContext context) throws Exception {
+		protected void processInput(MailboxDefaultAction.Controller controller) throws Exception {
 			checkTaskThreadInfo();
 			if (hasTimerTriggered) {
-				context.allActionsCompleted();
+				controller.allActionsCompleted();
 			}
 		}
 
@@ -1418,7 +1472,7 @@ public class StreamTaskTest extends TestLogger {
 				"Task's method was called in non task thread.");
 			Preconditions.checkState(
 				taskClassLoader == currentThread.getContextClassLoader(),
-				"Task's context class loader has been changed during invocation.");
+				"Task's controller class loader has been changed during invocation.");
 		}
 	}
 
@@ -1487,14 +1541,14 @@ public class StreamTaskTest extends TestLogger {
 		}
 
 		@Override
-		public void initializeState(StateInitializationContext context) throws Exception {
+		public void initializeState(StateInitializationContext controller) throws Exception {
 			keyedStateBackend = (AbstractKeyedStateBackend<?>) getKeyedStateBackend();
 			operatorStateBackend = getOperatorStateBackend();
 			rawOperatorStateInputs =
-				(CloseableIterable<StatePartitionStreamProvider>) context.getRawOperatorStateInputs();
+				(CloseableIterable<StatePartitionStreamProvider>) controller.getRawOperatorStateInputs();
 			rawKeyedStateInputs =
-				(CloseableIterable<KeyGroupStatePartitionStreamProvider>) context.getRawKeyedStateInputs();
-			super.initializeState(context);
+				(CloseableIterable<KeyGroupStatePartitionStreamProvider>) controller.getRawKeyedStateInputs();
+			super.initializeState(controller);
 		}
 	}
 
@@ -1693,6 +1747,30 @@ public class StreamTaskTest extends TestLogger {
 
 		Throwable getLastDeclinedCheckpointCause() {
 			return lastDeclinedCheckpointCause;
+		}
+	}
+
+	private static class UnusedOperatorFactory implements StreamOperatorFactory<String> {
+		@Override
+		public <T extends StreamOperator<String>> T createStreamOperator(
+				StreamTask<?, ?> containingTask,
+				StreamConfig config,
+				Output<StreamRecord<String>> output) {
+			throw new UnsupportedOperationException("This shouldn't be called");
+		}
+
+		@Override
+		public void setChainingStrategy(ChainingStrategy strategy) {
+		}
+
+		@Override
+		public ChainingStrategy getChainingStrategy() {
+			return ChainingStrategy.ALWAYS;
+		}
+
+		@Override
+		public Class<? extends StreamOperator> getStreamOperatorClass(ClassLoader classLoader) {
+			throw new UnsupportedOperationException();
 		}
 	}
 }

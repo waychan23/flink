@@ -69,12 +69,12 @@ public class YARNITCase extends YarnTestBase {
 			configuration.setString(AkkaOptions.ASK_TIMEOUT, "30 s");
 			final YarnClient yarnClient = getYarnClient();
 
-			try (final YarnClusterDescriptor yarnClusterDescriptor = new YarnClusterDescriptor(
-				configuration,
-				getYarnConfiguration(),
-				System.getenv(ConfigConstants.ENV_FLINK_CONF_DIR),
-				yarnClient,
-				true)) {
+			try (final YarnClusterDescriptor yarnClusterDescriptor = org.apache.flink.yarn.YarnTestUtils.createClusterDescriptorWithLogging(
+					System.getenv(ConfigConstants.ENV_FLINK_CONF_DIR),
+					configuration,
+					getYarnConfiguration(),
+					yarnClient,
+					true)) {
 
 				yarnClusterDescriptor.setLocalJarPath(new Path(flinkUberjar.getAbsolutePath()));
 				yarnClusterDescriptor.addShipFiles(Arrays.asList(flinkLibFolder.listFiles()));

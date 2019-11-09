@@ -204,7 +204,7 @@ object FlinkStreamRuleSets {
     ProjectSetOpTransposeRule.INSTANCE
   )
 
-  val JOIN_REORDER_PERPARE_RULES: RuleSet = RuleSets.ofList(
+  val JOIN_REORDER_PREPARE_RULES: RuleSet = RuleSets.ofList(
     // merge project to MultiJoin
     ProjectMultiJoinMergeRule.INSTANCE,
     // merge filter to MultiJoin
@@ -336,8 +336,15 @@ object FlinkStreamRuleSets {
     SplitAggregateRule.INSTANCE,
     // transpose calc past snapshot
     CalcSnapshotTransposeRule.INSTANCE,
+    // Rule that splits python ScalarFunctions from join conditions
+    SplitPythonConditionFromJoinRule.INSTANCE,
     // merge calc after calc transpose
-    FlinkCalcMergeRule.INSTANCE
+    FlinkCalcMergeRule.INSTANCE,
+    // Rule that splits python ScalarFunctions from java/scala ScalarFunctions.
+    PythonCalcSplitRule.SPLIT_CONDITION,
+    PythonCalcSplitRule.SPLIT_PROJECT,
+    PythonCalcSplitRule.PUSH_CONDITION,
+    PythonCalcSplitRule.REWRITE_PROJECT
   )
 
   /**
@@ -353,6 +360,7 @@ object FlinkStreamRuleSets {
     StreamExecValuesRule.INSTANCE,
     // calc
     StreamExecCalcRule.INSTANCE,
+    StreamExecPythonCalcRule.INSTANCE,
     // union
     StreamExecUnionRule.INSTANCE,
     // sort

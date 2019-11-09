@@ -58,12 +58,14 @@ public class ConfigOptionsDocGenerator {
 	static final OptionsClassLocation[] LOCATIONS = new OptionsClassLocation[]{
 		new OptionsClassLocation("flink-core", "org.apache.flink.configuration"),
 		new OptionsClassLocation("flink-runtime", "org.apache.flink.runtime.shuffle"),
+		new OptionsClassLocation("flink-runtime", "org.apache.flink.runtime.jobgraph"),
 		new OptionsClassLocation("flink-yarn", "org.apache.flink.yarn.configuration"),
 		new OptionsClassLocation("flink-mesos", "org.apache.flink.mesos.configuration"),
 		new OptionsClassLocation("flink-mesos", "org.apache.flink.mesos.runtime.clusterframework"),
 		new OptionsClassLocation("flink-metrics/flink-metrics-prometheus", "org.apache.flink.metrics.prometheus"),
 		new OptionsClassLocation("flink-state-backends/flink-statebackend-rocksdb", "org.apache.flink.contrib.streaming.state"),
-		new OptionsClassLocation("flink-table/flink-table-api-java", "org.apache.flink.table.api.config")
+		new OptionsClassLocation("flink-table/flink-table-api-java", "org.apache.flink.table.api.config"),
+		new OptionsClassLocation("flink-python", "org.apache.flink.python")
 	};
 
 	static final Set<String> EXCLUSIONS = new HashSet<>(Arrays.asList(

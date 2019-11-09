@@ -34,6 +34,7 @@ import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.java.tuple.Tuple1;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.api.java.tuple.Tuple3;
+import org.apache.flink.client.ClientUtils;
 import org.apache.flink.client.program.ClusterClient;
 import org.apache.flink.client.program.ProgramInvocationException;
 import org.apache.flink.configuration.Configuration;
@@ -252,7 +253,7 @@ public abstract class KafkaConsumerTestBase extends KafkaTestBaseWithFlink {
 		while (System.nanoTime() < deadline);
 
 		// cancel the job & wait for the job to finish
-		client.cancel(Iterables.getOnlyElement(getRunningJobs(client)));
+		client.cancel(Iterables.getOnlyElement(getRunningJobs(client))).get();
 		runner.join();
 
 		final Throwable t = errorRef.get();
@@ -337,7 +338,7 @@ public abstract class KafkaConsumerTestBase extends KafkaTestBaseWithFlink {
 		while (System.nanoTime() < deadline);
 
 		// cancel the job & wait for the job to finish
-		client.cancel(Iterables.getOnlyElement(getRunningJobs(client)));
+		client.cancel(Iterables.getOnlyElement(getRunningJobs(client))).get();
 		runner.join();
 
 		final Throwable t = errorRef.get();
@@ -452,16 +453,12 @@ public abstract class KafkaConsumerTestBase extends KafkaTestBaseWithFlink {
 		final JobID consumeJobId = jobGraph.getJobID();
 
 		final AtomicReference<Throwable> error = new AtomicReference<>();
-		Thread consumeThread = new Thread(new Runnable() {
-			@Override
-			public void run() {
-				try {
-					client.setDetached(false);
-					client.submitJob(jobGraph, KafkaConsumerTestBase.class.getClassLoader());
-				} catch (Throwable t) {
-					if (!ExceptionUtils.findThrowable(t, JobCancellationException.class).isPresent()) {
-						error.set(t);
-					}
+		Thread consumeThread = new Thread(() -> {
+			try {
+				ClientUtils.submitJobAndWaitForResult(client, jobGraph, KafkaConsumerTestBase.class.getClassLoader());
+			} catch (Throwable t) {
+				if (!ExceptionUtils.findThrowable(t, JobCancellationException.class).isPresent()) {
+					error.set(t);
 				}
 			}
 		});
@@ -507,7 +504,7 @@ public abstract class KafkaConsumerTestBase extends KafkaTestBaseWithFlink {
 		}
 
 		// cancel the consume job after all extra records are written
-		client.cancel(consumeJobId);
+		client.cancel(consumeJobId).get();
 		consumeThread.join();
 
 		kafkaOffsetHandler.close();
@@ -1002,16 +999,11 @@ public abstract class KafkaConsumerTestBase extends KafkaTestBaseWithFlink {
 		JobGraph jobGraph = StreamingJobGraphGenerator.createJobGraph(env.getStreamGraph());
 		final JobID jobId = jobGraph.getJobID();
 
-		final Runnable jobRunner = new Runnable() {
-			@Override
-			public void run() {
-				try {
-					client.setDetached(false);
-					client.submitJob(jobGraph, KafkaConsumerTestBase.class.getClassLoader());
-				}
-				catch (Throwable t) {
-					jobError.set(t);
-				}
+		final Runnable jobRunner = () -> {
+			try {
+				ClientUtils.submitJobAndWaitForResult(client, jobGraph, KafkaConsumerTestBase.class.getClassLoader());
+			} catch (Throwable t) {
+				jobError.set(t);
 			}
 		};
 
@@ -1028,7 +1020,7 @@ public abstract class KafkaConsumerTestBase extends KafkaTestBaseWithFlink {
 		}
 
 		// cancel
-		client.cancel(jobId);
+		client.cancel(jobId).get();
 
 		// wait for the program to be done and validate that we failed with the right exception
 		runnerThread.join();
@@ -1077,17 +1069,12 @@ public abstract class KafkaConsumerTestBase extends KafkaTestBaseWithFlink {
 		JobGraph jobGraph = StreamingJobGraphGenerator.createJobGraph(env.getStreamGraph());
 		final JobID jobId = jobGraph.getJobID();
 
-		final Runnable jobRunner = new Runnable() {
-			@Override
-			public void run() {
-				try {
-					client.setDetached(false);
-					client.submitJob(jobGraph, KafkaConsumerTestBase.class.getClassLoader());
-				}
-				catch (Throwable t) {
-					LOG.error("Job Runner failed with exception", t);
-					error.set(t);
-				}
+		final Runnable jobRunner = () -> {
+			try {
+				ClientUtils.submitJobAndWaitForResult(client, jobGraph, KafkaConsumerTestBase.class.getClassLoader());
+			} catch (Throwable t) {
+				LOG.error("Job Runner failed with exception", t);
+				error.set(t);
 			}
 		};
 
@@ -1103,7 +1090,7 @@ public abstract class KafkaConsumerTestBase extends KafkaTestBaseWithFlink {
 			Assert.fail("Test failed prematurely with: " + failueCause.getMessage());
 		}
 		// cancel
-		client.cancel(jobId);
+		client.cancel(jobId).get();
 
 		// wait for the program to be done and validate that we failed with the right exception
 		runnerThread.join();
@@ -1604,21 +1591,16 @@ public abstract class KafkaConsumerTestBase extends KafkaTestBaseWithFlink {
 		JobGraph jobGraph = StreamingJobGraphGenerator.createJobGraph(env1.getStreamGraph());
 		final JobID jobId = jobGraph.getJobID();
 
-		Runnable job = new Runnable() {
-			@Override
-			public void run() {
-				try {
-					client.setDetached(false);
-					client.submitJob(jobGraph, KafkaConsumerTestBase.class.getClassLoader());
-				} catch (Throwable t) {
-					if (!ExceptionUtils.findThrowable(t, JobCancellationException.class).isPresent()) {
-						LOG.warn("Got exception during execution", t);
-						error.f0 = t;
-					}
+		Thread jobThread = new Thread(() -> {
+			try {
+				ClientUtils.submitJobAndWaitForResult(client, jobGraph, KafkaConsumerTestBase.class.getClassLoader());
+			} catch (Throwable t) {
+				if (!ExceptionUtils.findThrowable(t, JobCancellationException.class).isPresent()) {
+					LOG.warn("Got exception during execution", t);
+					error.f0 = t;
 				}
 			}
-		};
-		Thread jobThread = new Thread(job);
+		});
 		jobThread.start();
 
 		try {
@@ -1661,7 +1643,7 @@ public abstract class KafkaConsumerTestBase extends KafkaTestBaseWithFlink {
 			LOG.info("Found all JMX metrics. Cancelling job.");
 		} finally {
 			// cancel
-			client.cancel(jobId);
+			client.cancel(jobId).get();
 			// wait for the job to finish (it should due to the cancel command above)
 			jobThread.join();
 		}
@@ -2049,20 +2031,16 @@ public abstract class KafkaConsumerTestBase extends KafkaTestBaseWithFlink {
 		JobGraph jobGraph = StreamingJobGraphGenerator.createJobGraph(readEnv.getStreamGraph());
 		final JobID jobId = jobGraph.getJobID();
 
-		Thread runner = new Thread() {
-			@Override
-			public void run() {
-				try {
-					client.setDetached(false);
-					client.submitJob(jobGraph, KafkaConsumerTestBase.class.getClassLoader());
-					tryExecute(readEnv, "sequence validation");
-				} catch (Throwable t) {
-					if (!ExceptionUtils.findThrowable(t, SuccessException.class).isPresent()) {
-						errorRef.set(t);
-					}
+		Thread runner = new Thread(() -> {
+			try {
+				ClientUtils.submitJobAndWaitForResult(client, jobGraph, KafkaConsumerTestBase.class.getClassLoader());
+				tryExecute(readEnv, "sequence validation");
+			} catch (Throwable t) {
+				if (!ExceptionUtils.findThrowable(t, SuccessException.class).isPresent()) {
+					errorRef.set(t);
 				}
 			}
-		};
+		});
 		runner.start();
 
 		final long deadline = System.nanoTime() + 10_000_000_000L;
@@ -2077,7 +2055,7 @@ public abstract class KafkaConsumerTestBase extends KafkaTestBaseWithFlink {
 			// did not finish in time, maybe the producer dropped one or more records and
 			// the validation did not reach the exit point
 			success = false;
-			client.cancel(jobId);
+			client.cancel(jobId).get();
 		}
 		else {
 			Throwable error = errorRef.get();

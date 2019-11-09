@@ -58,21 +58,33 @@ abstract class PhysicalTableSourceScan(
   }
 
   override def explainTerms(pw: RelWriter): RelWriter = {
-    super.explainTerms(pw).item("fields", getRowType.getFieldNames.asScala.mkString(", "))
+    val hasWatermark = tableSourceTable.watermarkSpec.isDefined && tableSourceTable.isStreamingMode
+    val rowtime = tableSourceTable.watermarkSpec.map(_.getRowtimeAttribute).orNull
+    val watermark = tableSourceTable.watermarkSpec.map(_.getWatermarkExpressionString).orNull
+    super.explainTerms(pw)
+      .item("fields", getRowType.getFieldNames.asScala.mkString(", "))
+      .itemIf("rowtime", rowtime, hasWatermark)
+      .itemIf("watermark", watermark, hasWatermark)
   }
 
-  def getSourceTransformation(
-      streamEnv: StreamExecutionEnvironment): Transformation[_] = {
+  def createInput[IN](
+      env: StreamExecutionEnvironment,
+      format: InputFormat[IN, _ <: InputSplit],
+      t: TypeInformation[IN]): Transformation[IN]
+
+  def getSourceTransformation(env: StreamExecutionEnvironment): Transformation[_] = {
     if (sourceTransform == null) {
       sourceTransform = tableSource match {
         case format: InputFormatTableSource[_] =>
           // we don't use InputFormatTableSource.getDataStream, because in here we use planner
           // type conversion to support precision of Varchar and something else.
-          streamEnv.createInput(
+          val typeInfo = fromDataTypeToTypeInfo(format.getProducedDataType)
+              .asInstanceOf[TypeInformation[Any]]
+          createInput(
+            env,
             format.getInputFormat.asInstanceOf[InputFormat[Any, _ <: InputSplit]],
-            fromDataTypeToTypeInfo(format.getProducedDataType).asInstanceOf[TypeInformation[Any]]
-          ).name(format.explainSource()).getTransformation
-        case s: StreamTableSource[_] => s.getDataStream(streamEnv).getTransformation
+            typeInfo.asInstanceOf[TypeInformation[Any]])
+        case s: StreamTableSource[_] => s.getDataStream(env).getTransformation
       }
     }
     sourceTransform

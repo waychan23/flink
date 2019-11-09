@@ -39,7 +39,7 @@ import org.apache.flink.runtime.deployment.TaskDeploymentDescriptor;
 import org.apache.flink.runtime.deployment.TaskDeploymentDescriptorFactory;
 import org.apache.flink.runtime.execution.ExecutionState;
 import org.apache.flink.runtime.instance.SlotSharingGroupId;
-import org.apache.flink.runtime.io.network.partition.PartitionTracker;
+import org.apache.flink.runtime.io.network.partition.JobMasterPartitionTracker;
 import org.apache.flink.runtime.io.network.partition.ResultPartitionID;
 import org.apache.flink.runtime.jobgraph.IntermediateDataSetID;
 import org.apache.flink.runtime.jobgraph.IntermediateResultPartitionID;
@@ -57,7 +57,6 @@ import org.apache.flink.runtime.shuffle.PartitionDescriptor;
 import org.apache.flink.runtime.shuffle.ProducerDescriptor;
 import org.apache.flink.runtime.shuffle.ShuffleDescriptor;
 import org.apache.flink.runtime.shuffle.ShuffleMaster;
-import org.apache.flink.runtime.state.KeyGroupRangeAssignment;
 import org.apache.flink.runtime.taskmanager.TaskManagerLocation;
 import org.apache.flink.util.ExceptionUtils;
 import org.apache.flink.util.FlinkException;
@@ -441,14 +440,7 @@ public class Execution implements AccessExecution, Archiveable<ArchivedExecution
 				locationPreferenceConstraint,
 				allPreviousExecutionGraphAllocationIds);
 
-			final CompletableFuture<Void> deploymentFuture;
-
-			if (allocationFuture.isDone() || slotProviderStrategy.isQueuedSchedulingAllowed()) {
-				deploymentFuture = allocationFuture.thenRun(ThrowingRunnable.unchecked(this::deploy));
-			} else {
-				deploymentFuture = FutureUtils.completedExceptionally(
-					new IllegalArgumentException("The slot allocation future has not been completed yet."));
-			}
+			final CompletableFuture<Void> deploymentFuture = allocationFuture.thenRun(ThrowingRunnable.unchecked(this::deploy));
 
 			deploymentFuture.whenComplete(
 				(Void ignored, Throwable failure) -> {
@@ -657,14 +649,11 @@ public class Execution implements AccessExecution, Archiveable<ArchivedExecution
 	}
 
 	private static int getPartitionMaxParallelism(IntermediateResultPartition partition) {
-		// TODO consumers.isEmpty() only exists for test, currently there has to be exactly one consumer in real jobs!
 		final List<List<ExecutionEdge>> consumers = partition.getConsumers();
-		int maxParallelism = KeyGroupRangeAssignment.UPPER_BOUND_MAX_PARALLELISM;
-		if (!consumers.isEmpty()) {
-			List<ExecutionEdge> consumer = consumers.get(0);
-			ExecutionJobVertex consumerVertex = consumer.get(0).getTarget().getJobVertex();
-			maxParallelism = consumerVertex.getMaxParallelism();
-		}
+		Preconditions.checkArgument(!consumers.isEmpty(), "Currently there has to be exactly one consumer in real jobs");
+		List<ExecutionEdge> consumer = consumers.get(0);
+		ExecutionJobVertex consumerVertex = consumer.get(0).getTarget().getJobVertex();
+		int maxParallelism = consumerVertex.getMaxParallelism();
 		return maxParallelism;
 	}
 
@@ -1238,11 +1227,14 @@ public class Execution implements AccessExecution, Archiveable<ArchivedExecution
 
 			if (!fromSchedulerNg && !isLegacyScheduling()) {
 				vertex.getExecutionGraph().notifySchedulerNgAboutInternalTaskFailure(attemptId, t);
+
 				// HACK: We informed the new generation scheduler about an internally detected task
 				// failure. The scheduler will call processFail() again with releasePartitions
-				// always set to false and fromSchedulerNg set to true. Because the original value
-				// of releasePartitions will be lost, we need to invoke handlePartitionCleanup() here.
-				handlePartitionCleanup(releasePartitions, releasePartitions);
+				// always set to false, isCallback to true and fromSchedulerNg set to true.
+				// Because the original value of releasePartitions and isCallback will be lost,
+				// we may need to invoke partition release and remote canceling here.
+				maybeReleasePartitionsAndSendCancelRpcCall(current, isCallback, releasePartitions);
+
 				return;
 			} else if (transitionState(current, FAILED, t)) {
 				// success (in a manner of speaking)
@@ -1252,25 +1244,36 @@ public class Execution implements AccessExecution, Archiveable<ArchivedExecution
 
 				releaseAssignedResource(t);
 				vertex.getExecutionGraph().deregisterExecution(this);
-				handlePartitionCleanup(releasePartitions, releasePartitions);
 
-				if (!isCallback && (current == RUNNING || current == DEPLOYING)) {
-					if (LOG.isDebugEnabled()) {
-						LOG.debug("Sending out cancel request, to remove task execution from TaskManager.");
-					}
-
-					try {
-						if (assignedResource != null) {
-							sendCancelRpcCall(NUM_CANCEL_CALL_TRIES);
-						}
-					} catch (Throwable tt) {
-						// no reason this should ever happen, but log it to be safe
-						LOG.error("Error triggering cancel call while marking task {} as failed.", getVertex().getTaskNameWithSubtaskIndex(), tt);
-					}
+				if (isLegacyScheduling()) {
+					maybeReleasePartitionsAndSendCancelRpcCall(current, isCallback, releasePartitions);
 				}
 
 				// leave the loop
 				return;
+			}
+		}
+	}
+
+	private void maybeReleasePartitionsAndSendCancelRpcCall(
+			final ExecutionState stateBeforeFailed,
+			final boolean isCallback,
+			final boolean releasePartitions) {
+
+		handlePartitionCleanup(releasePartitions, releasePartitions);
+
+		if (!isCallback && (stateBeforeFailed == RUNNING || stateBeforeFailed == DEPLOYING)) {
+			if (LOG.isDebugEnabled()) {
+				LOG.debug("Sending out cancel request, to remove task execution from TaskManager.");
+			}
+
+			try {
+				if (assignedResource != null) {
+					sendCancelRpcCall(NUM_CANCEL_CALL_TRIES);
+				}
+			} catch (Throwable tt) {
+				// no reason this should ever happen, but log it to be safe
+				LOG.error("Error triggering cancel call while marking task {} as failed.", getVertex().getTaskNameWithSubtaskIndex(), tt);
 			}
 		}
 	}
@@ -1347,7 +1350,7 @@ public class Execution implements AccessExecution, Archiveable<ArchivedExecution
 	}
 
 	private void startTrackingPartitions(final ResourceID taskExecutorId, final Collection<ResultPartitionDeploymentDescriptor> partitions) {
-		PartitionTracker partitionTracker = vertex.getExecutionGraph().getPartitionTracker();
+		JobMasterPartitionTracker partitionTracker = vertex.getExecutionGraph().getPartitionTracker();
 		for (ResultPartitionDeploymentDescriptor partition : partitions) {
 			partitionTracker.startTrackingPartition(
 				taskExecutorId,
@@ -1361,7 +1364,7 @@ public class Execution implements AccessExecution, Archiveable<ArchivedExecution
 		}
 
 		final Collection<ResultPartitionID> partitionIds = getPartitionIds();
-		final PartitionTracker partitionTracker = getVertex().getExecutionGraph().getPartitionTracker();
+		final JobMasterPartitionTracker partitionTracker = getVertex().getExecutionGraph().getPartitionTracker();
 
 		if (!partitionIds.isEmpty()) {
 			if (releaseBlockingPartitions) {
@@ -1389,12 +1392,12 @@ public class Execution implements AccessExecution, Archiveable<ArchivedExecution
 
 			final ShuffleMaster<?> shuffleMaster = getVertex().getExecutionGraph().getShuffleMaster();
 
-			Collection<ResultPartitionID> partitionIds = producedPartitions.values().stream()
+			Set<ResultPartitionID> partitionIds = producedPartitions.values().stream()
 				.filter(resultPartitionDeploymentDescriptor -> resultPartitionDeploymentDescriptor.getPartitionType().isPipelined())
 				.map(ResultPartitionDeploymentDescriptor::getShuffleDescriptor)
 				.peek(shuffleMaster::releasePartitionExternally)
 				.map(ShuffleDescriptor::getResultPartitionID)
-				.collect(Collectors.toList());
+				.collect(Collectors.toSet());
 
 			if (!partitionIds.isEmpty()) {
 				// TODO For some tests this could be a problem when querying too early if all resources were released

@@ -27,20 +27,41 @@ void TableColumn(TableCreationContext context) :
         UniqueKey(context.uniqueKeysList)
     |
         ComputedColumn(context)
+    |
+        Watermark(context)
     )
+}
+
+void Watermark(TableCreationContext context) :
+{
+    SqlIdentifier eventTimeColumnName;
+    SqlParserPos pos;
+    SqlNode watermarkStrategy;
+}
+{
+    <WATERMARK> {pos = getPos();} <FOR>
+    eventTimeColumnName = CompoundIdentifier()
+    <AS>
+    watermarkStrategy = Expression(ExprContext.ACCEPT_NON_QUERY) {
+        if (context.watermark != null) {
+            throw SqlUtil.newContextException(pos,
+                ParserResource.RESOURCE.multipleWatermarksUnsupported());
+        } else {
+            context.watermark = new SqlWatermark(pos, eventTimeColumnName, watermarkStrategy);
+        }
+    }
 }
 
 void ComputedColumn(TableCreationContext context) :
 {
     SqlNode identifier;
     SqlNode expr;
-    boolean hidden = false;
     SqlParserPos pos;
 }
 {
     identifier = SimpleIdentifier() {pos = getPos();}
     <AS>
-    expr = Expression(ExprContext.ACCEPT_SUB_QUERY) {
+    expr = Expression(ExprContext.ACCEPT_NON_QUERY) {
         expr = SqlStdOperatorTable.AS.createCall(Span.of(identifier, expr).pos(), expr, identifier);
         context.columnList.add(expr);
     }
@@ -173,8 +194,9 @@ SqlCreate SqlCreateTable(Span s, boolean replace) :
 {
     final SqlParserPos startPos = s.pos();
     SqlIdentifier tableName;
-    SqlNodeList primaryKeyList = null;
-    List<SqlNodeList> uniqueKeysList = null;
+    SqlNodeList primaryKeyList = SqlNodeList.EMPTY;
+    List<SqlNodeList> uniqueKeysList = new ArrayList<SqlNodeList>();
+    SqlWatermark watermark = null;
     SqlNodeList columnList = SqlNodeList.EMPTY;
 	SqlCharStringLiteral comment = null;
 
@@ -197,6 +219,7 @@ SqlCreate SqlCreateTable(Span s, boolean replace) :
             columnList = new SqlNodeList(ctx.columnList, pos);
             primaryKeyList = ctx.primaryKeyList;
             uniqueKeysList = ctx.uniqueKeysList;
+            watermark = ctx.watermark;
         }
         <RPAREN>
     ]
@@ -220,6 +243,7 @@ SqlCreate SqlCreateTable(Span s, boolean replace) :
                 uniqueKeysList,
                 propertyList,
                 partitionColumns,
+                watermark,
                 comment);
     }
 }
@@ -272,9 +296,11 @@ SqlNode RichSqlInsert() :
     |
         <OVERWRITE> {
             if (!((FlinkSqlConformance) this.conformance).allowInsertOverwrite()) {
-                throw new ParseException("OVERWRITE expression is only allowed for HIVE dialect");
+                throw SqlUtil.newContextException(getPos(),
+                    ParserResource.RESOURCE.overwriteIsOnlyAllowedForHive());
             } else if (RichSqlInsert.isUpsert(keywords)) {
-                throw new ParseException("OVERWRITE expression is only used with INSERT mode");
+                throw SqlUtil.newContextException(getPos(),
+                    ParserResource.RESOURCE.overwriteIsOnlyUsedWithInsert());
             }
             extendedKeywords.add(RichSqlInsertKeyword.OVERWRITE.symbol(getPos()));
         }
@@ -307,7 +333,8 @@ SqlNode RichSqlInsert() :
     [
         <PARTITION> PartitionSpecCommaList(partitionList) {
             if (!((FlinkSqlConformance) this.conformance).allowInsertIntoPartition()) {
-                throw new ParseException("PARTITION expression is only allowed for HIVE dialect");
+                throw SqlUtil.newContextException(getPos(),
+                    ParserResource.RESOURCE.partitionIsOnlyAllowedForHive());
             }
         }
     ]

@@ -26,7 +26,6 @@ import org.apache.flink.configuration.ConfigConstants;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.NettyShuffleEnvironmentOptions;
 import org.apache.flink.configuration.TaskManagerOptions;
-import org.apache.flink.core.memory.MemoryType;
 import org.apache.flink.core.testutils.OneShotLatch;
 import org.apache.flink.runtime.blob.BlobCacheService;
 import org.apache.flink.runtime.blob.TransientBlobKey;
@@ -58,6 +57,7 @@ import org.apache.flink.runtime.io.disk.iomanager.IOManagerAsync;
 import org.apache.flink.runtime.io.network.NettyShuffleEnvironment;
 import org.apache.flink.runtime.io.network.NettyShuffleEnvironmentBuilder;
 import org.apache.flink.runtime.io.network.partition.NoOpResultPartitionConsumableNotifier;
+import org.apache.flink.runtime.io.network.partition.TaskExecutorPartitionTrackerImpl;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
 import org.apache.flink.runtime.jobgraph.tasks.AbstractInvokable;
 import org.apache.flink.runtime.jobmaster.AllocatedSlotInfo;
@@ -71,6 +71,7 @@ import org.apache.flink.runtime.leaderretrieval.LeaderRetrievalListener;
 import org.apache.flink.runtime.leaderretrieval.LeaderRetrievalService;
 import org.apache.flink.runtime.leaderretrieval.SettableLeaderRetrievalService;
 import org.apache.flink.runtime.memory.MemoryManager;
+import org.apache.flink.runtime.memory.MemoryManagerBuilder;
 import org.apache.flink.runtime.messages.Acknowledge;
 import org.apache.flink.runtime.metrics.groups.UnregisteredMetricGroups;
 import org.apache.flink.runtime.query.KvStateRegistry;
@@ -87,7 +88,6 @@ import org.apache.flink.runtime.state.TaskExecutorLocalStateStoresManager;
 import org.apache.flink.runtime.taskexecutor.TaskSubmissionTestEnvironment.Builder;
 import org.apache.flink.runtime.taskexecutor.exceptions.RegistrationTimeoutException;
 import org.apache.flink.runtime.taskexecutor.exceptions.TaskManagerException;
-import org.apache.flink.runtime.taskexecutor.partition.PartitionTable;
 import org.apache.flink.runtime.taskexecutor.slot.SlotNotFoundException;
 import org.apache.flink.runtime.taskexecutor.slot.SlotOffer;
 import org.apache.flink.runtime.taskexecutor.slot.TaskSlotTable;
@@ -193,8 +193,6 @@ public class TaskExecutorTest extends TestLogger {
 
 	private Configuration configuration;
 
-	private TaskManagerConfiguration taskManagerConfiguration;
-
 	private TaskManagerLocation taskManagerLocation;
 
 	private JobID jobId;
@@ -220,7 +218,6 @@ public class TaskExecutorTest extends TestLogger {
 			null);
 
 		configuration = new Configuration();
-		taskManagerConfiguration = TaskManagerConfiguration.fromConfiguration(configuration);
 
 		taskManagerLocation = new LocalTaskManagerLocation();
 		jobId = new JobID();
@@ -273,12 +270,11 @@ public class TaskExecutorTest extends TestLogger {
 			ioManager.getSpillingDirectories(),
 			Executors.directExecutor());
 
-		final MemoryManager memoryManager = new MemoryManager(
-			4096,
-			1,
-			4096,
-			MemoryType.HEAP,
-			false);
+		final MemoryManager memoryManager = MemoryManagerBuilder
+			.newBuilder()
+			.setMemorySize(4096)
+			.setPageSize(4096)
+			.build();
 
 		nettyShuffleEnvironment.start();
 
@@ -1923,7 +1919,7 @@ public class TaskExecutorTest extends TestLogger {
 			null,
 			dummyBlobCacheService,
 			testingFatalErrorHandler,
-			new PartitionTable<>());
+			new TaskExecutorPartitionTrackerImpl());
 	}
 
 	private TestingTaskExecutor createTestingTaskExecutor(TaskManagerServices taskManagerServices) {
@@ -1941,7 +1937,7 @@ public class TaskExecutorTest extends TestLogger {
 			null,
 			dummyBlobCacheService,
 			testingFatalErrorHandler,
-			new PartitionTable<>());
+			new TaskExecutorPartitionTrackerImpl());
 	}
 
 	private static final class StartStopNotifyingLeaderRetrievalService implements LeaderRetrievalService {

@@ -20,8 +20,12 @@ package org.apache.flink.python;
 
 import org.apache.flink.annotation.Internal;
 import org.apache.flink.annotation.VisibleForTesting;
+import org.apache.flink.api.common.typeutils.TypeSerializer;
+import org.apache.flink.configuration.ConfigConstants;
 import org.apache.flink.core.memory.ByteArrayInputStreamWithPos;
 import org.apache.flink.core.memory.ByteArrayOutputStreamWithPos;
+import org.apache.flink.core.memory.DataInputViewStreamWrapper;
+import org.apache.flink.core.memory.DataOutputViewStreamWrapper;
 import org.apache.flink.table.functions.python.PythonEnv;
 import org.apache.flink.util.Preconditions;
 import org.apache.flink.util.StringUtils;
@@ -38,7 +42,6 @@ import org.apache.beam.runners.fnexecution.control.RemoteBundle;
 import org.apache.beam.runners.fnexecution.control.StageBundleFactory;
 import org.apache.beam.runners.fnexecution.provisioning.JobInfo;
 import org.apache.beam.runners.fnexecution.state.StateRequestHandler;
-import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.fn.data.FnDataReceiver;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
 import org.apache.beam.sdk.options.PortablePipelineOptions;
@@ -50,8 +53,6 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.util.Arrays;
-import java.util.HashMap;
-import java.util.Map;
 import java.util.Random;
 
 /**
@@ -123,14 +124,14 @@ public abstract class AbstractPythonFunctionRunner<IN, OUT> implements PythonFun
 	private transient FnDataReceiver<WindowedValue<?>> mainInputReceiver;
 
 	/**
-	 * The coder for input elements.
+	 * The TypeSerializer for input elements.
 	 */
-	private transient Coder<IN> inputCoder;
+	private transient TypeSerializer<IN> inputTypeSerializer;
 
 	/**
-	 * The coder for execution results.
+	 * The TypeSerializer for execution results.
 	 */
-	private transient Coder<OUT> outputCoder;
+	private transient TypeSerializer<OUT> outputTypeSerializer;
 
 	/**
 	 * Reusable InputStream used to holding the execution results to be deserialized.
@@ -138,9 +139,19 @@ public abstract class AbstractPythonFunctionRunner<IN, OUT> implements PythonFun
 	private transient ByteArrayInputStreamWithPos bais;
 
 	/**
+	 * InputStream Wrapper.
+	 */
+	private transient DataInputViewStreamWrapper baisWrapper;
+
+	/**
 	 * Reusable OutputStream used to holding the serialized input elements.
 	 */
 	private transient ByteArrayOutputStreamWithPos baos;
+
+	/**
+	 * OutputStream Wrapper.
+	 */
+	private transient DataOutputViewStreamWrapper baosWrapper;
 
 	public AbstractPythonFunctionRunner(
 		String taskName,
@@ -158,9 +169,11 @@ public abstract class AbstractPythonFunctionRunner<IN, OUT> implements PythonFun
 	@Override
 	public void open() throws Exception {
 		bais = new ByteArrayInputStreamWithPos();
+		baisWrapper = new DataInputViewStreamWrapper(bais);
 		baos = new ByteArrayOutputStreamWithPos();
-		inputCoder = getInputCoder();
-		outputCoder = getOutputCoder();
+		baosWrapper = new DataOutputViewStreamWrapper(baos);
+		inputTypeSerializer = getInputTypeSerializer();
+		outputTypeSerializer = getOutputTypeSerializer();
 
 		PortablePipelineOptions portableOptions =
 			PipelineOptionsFactory.as(PortablePipelineOptions.class);
@@ -203,7 +216,7 @@ public abstract class AbstractPythonFunctionRunner<IN, OUT> implements PythonFun
 				public FnDataReceiver<WindowedValue<byte[]>> create(String pCollectionId) {
 					return input -> {
 						bais.setBuffer(input.getValue(), 0, input.getValue().length);
-						resultReceiver.accept(outputCoder.decode(bais));
+						resultReceiver.accept(outputTypeSerializer.deserialize(baisWrapper));
 					};
 				}
 			};
@@ -234,7 +247,7 @@ public abstract class AbstractPythonFunctionRunner<IN, OUT> implements PythonFun
 	public void processElement(IN element) {
 		try {
 			baos.reset();
-			inputCoder.encode(element, baos);
+			inputTypeSerializer.serialize(element, baosWrapper);
 			// TODO: support to use ValueOnlyWindowedValueCoder for better performance.
 			// Currently, FullWindowedValueCoder has to be used in Beam's portability framework.
 			mainInputReceiver.accept(WindowedValue.valueInGlobalWindow(baos.toByteArray()));
@@ -280,14 +293,15 @@ public abstract class AbstractPythonFunctionRunner<IN, OUT> implements PythonFun
 	 */
 	protected RunnerApi.Environment createPythonExecutionEnvironment() {
 		if (pythonEnv.getExecType() == PythonEnv.ExecType.PROCESS) {
-			final Map<String, String> env = new HashMap<>(2);
-			env.put("python", pythonEnv.getPythonExec());
+			String flinkHomePath = System.getenv(ConfigConstants.ENV_FLINK_HOME_DIR);
+			String pythonWorkerCommand =
+				flinkHomePath + File.separator + "bin" + File.separator + "pyflink-udf-runner.sh";
 
 			return Environments.createProcessEnvironment(
 				"",
 				"",
-				pythonEnv.getPythonWorkerCmd(),
-				env);
+				pythonWorkerCommand,
+				null);
 		} else {
 			throw new UnsupportedOperationException(String.format(
 				"Execution type '%s' is not supported.", pythonEnv.getExecType()));
@@ -302,12 +316,12 @@ public abstract class AbstractPythonFunctionRunner<IN, OUT> implements PythonFun
 	public abstract ExecutableStage createExecutableStage();
 
 	/**
-	 * Returns the coder for input elements.
+	 * Returns the TypeSerializer for input elements.
 	 */
-	public abstract Coder<IN> getInputCoder();
+	public abstract TypeSerializer<IN> getInputTypeSerializer();
 
 	/**
-	 * Returns the coder for execution results.
+	 * Returns the TypeSerializer for execution results.
 	 */
-	public abstract Coder<OUT> getOutputCoder();
+	public abstract TypeSerializer<OUT> getOutputTypeSerializer();
 }
